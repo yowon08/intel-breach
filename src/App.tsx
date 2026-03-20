@@ -1398,7 +1398,7 @@ function stopEscapeAudio() {
             <div style={styles.sideTitle}>현재 상태</div>
             <div style={styles.sideLine}>구역: {currentRoom.label}</div>
             <div style={styles.sideLine}>
-              비하인드 위치: {sameRoomWarning ? "같은 구역" : "탐지 필요"}
+              위험 요소: {sameRoomWarning ? "같은 구역" : "탐지 필요"}
             </div>
             <div style={styles.sideLine}>이동 상태: {isMoving ? "벤트 이동 중" : "정지"}</div>
           </div>
