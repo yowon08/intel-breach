@@ -1372,6 +1372,7 @@ function stopEscapeAudio() {
                       <div style={{ ...styles.progressFill, width: `${progress.B}%` }} />
                     </div>
                     <div style={styles.progressText}>{Math.floor(progress.B)}%</div>
+                  <img src="/images/logo.png" style={styles.bLogo} />
                   </div>
 
                   <div style={styles.progressCard}>
@@ -1809,10 +1810,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   progressCard: {
-    background: "#11171d",
-    border: "1px solid #5e6974",
-    padding: "12px",
-  },
+  background: "#11171d",
+  border: "1px solid #5e6974",
+  padding: "12px",
+  position: "relative", // 🔥 이거 필수
+},
 
   progressCardTitle: {
     fontSize: "14px",
@@ -1981,4 +1983,14 @@ const styles: Record<string, React.CSSProperties> = {
     marginLeft: 2,
     animation: "caretBlink 1s step-end infinite",
   },
+
+  bLogo: {
+  position: "absolute",
+  bottom: 8,        // 🔥 아래쪽 위치 (조절 가능)
+  left: "50%",
+  transform: "translateX(-50%)", // 가운데 맞추기
+  width: 34,
+  height: 34,
+  opacity: 0.9,
+},
 };
