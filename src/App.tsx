@@ -473,7 +473,7 @@ export default function App() {
 
     const audio = new Audio("/sounds/bisang.mp3");
     audio.loop = true;
-    audio.volume = 1;
+    audio.volume = 0.3;
     audio.play().catch(() => {});
     warningAudioRef.current = audio;
   }
