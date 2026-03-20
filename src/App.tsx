@@ -1372,7 +1372,7 @@ function stopEscapeAudio() {
                       <div style={{ ...styles.progressFill, width: `${progress.B}%` }} />
                     </div>
                     <div style={styles.progressText}>{Math.floor(progress.B)}%</div>
-                  <img src="/images/logo.png" style={styles.bLogo} />
+  
                   </div>
 
                   <div style={styles.progressCard}>
@@ -1389,6 +1389,7 @@ function stopEscapeAudio() {
                     ? "현재 구역에서는 태블릿을 켜 두는 동안 데이터가 누적된다."
                     : "현재 구역은 데이터 수집 지점이 아니다."}
                 </div>
+                <img src="/images/logo.png" style={styles.centerLogo} />
               </div>
             </div>
           )}
@@ -1789,6 +1790,7 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid #5b6670",
     background: "linear-gradient(180deg, #141b22 0%, #0d1217 100%)",
     padding: "18px",
+    position: "relative",
   },
 
   tabletTitle: {
@@ -1984,13 +1986,16 @@ const styles: Record<string, React.CSSProperties> = {
     animation: "caretBlink 1s step-end infinite",
   },
 
-  bLogo: {
+  
+
+centerLogo: {
   position: "absolute",
-  bottom: 8,        // 🔥 아래쪽 위치 (조절 가능)
+  top: "50%",
   left: "50%",
-  transform: "translateX(-50%)", // 가운데 맞추기
-  width: 34,
-  height: 34,
-  opacity: 0.9,
+  transform: "translate(-50%, -50%)",
+  width: 120,
+  height: 120,
+  opacity: 0.12, // 🔥 배경처럼 은은하게
+  pointerEvents: "none",
 },
 };
