@@ -39,7 +39,7 @@ const MOVE_TIME = 3200;
 
 const BEHIND_START_ROOMS = ["R4", "R8", "R12"];
 
-const ESCAPE_LINES = ["정보 수집 성공함.", "복귀.", "b1h1xnd"];
+const ESCAPE_LINES = ["정보 수집 성공함.", "복귀.", "S3CUR3D"];
 
 function randomOf<T>(arr: T[]) {
   return arr[Math.floor(Math.random() * arr.length)];
