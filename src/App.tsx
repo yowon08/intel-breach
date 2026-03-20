@@ -1173,7 +1173,7 @@ function stopEscapeAudio() {
 
       <div style={styles.headerRow}>
         <div>
-          <div style={styles.title}>Regular Engage</div>
+          <div style={styles.title}>Regular Engagement</div>
           <div style={styles.subTitle}> 데이터 침투 프로토콜 v2</div>
         </div>
 
@@ -1354,7 +1354,7 @@ function stopEscapeAudio() {
           ) : (
             <div style={styles.tabletWrap}>
               <div style={styles.tabletScreen}>
-                <div style={styles.tabletTitle}>정보국 데이터 체계</div>
+                <div style={styles.tabletTitle}>정보국 데이터 체계로 업로드</div>
                 <div style={styles.tabletCurrent}>현재 위치: {currentRoom.label}</div>
 
                 <div style={styles.progressGrid}>
