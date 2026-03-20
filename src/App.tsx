@@ -1389,7 +1389,7 @@ function stopEscapeAudio() {
                     ? "현재 구역에서는 태블릿을 켜 두는 동안 데이터가 누적된다."
                     : "현재 구역은 데이터 수집 지점이 아니다."}
                 </div>
-                <img src="/images/logo.png" style={styles.centerLogo} />
+                <img src="/images/logo.png" style={styles.tabletLogo} />
               </div>
             </div>
           )}
@@ -1988,14 +1988,11 @@ const styles: Record<string, React.CSSProperties> = {
 
   
 
-centerLogo: {
-  position: "absolute",
-  top: "50%",
-  left: "50%",
-  transform: "translate(-50%, -50%)",
-  width: 120,
-  height: 120,
-  opacity: 0.12, // 🔥 배경처럼 은은하게
-  pointerEvents: "none",
+tabletLogo: {
+  display: "block",
+  margin: "12px auto 0", // 🔥 가운데 정렬 핵심
+  width: 80,
+  height: 80,
+  opacity: 0.2,
 },
 };
