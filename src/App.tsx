@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { rooms, corridorSegments, startRooms, roomMap } from "./data/mapData";
 
 type ViewMode = "map" | "tablet";
@@ -39,17 +39,10 @@ const MOVE_TIME = 3200;
 
 const BEHIND_START_ROOMS = ["R4", "R8", "R12"];
 
-const ESCAPE_LINES = ["정보 수집 성공함.", "복귀.", "S3CUR3D"];
-const ENEMY_VENT_SOUNDS = [
-  "/sounds/vent2.mp3",
-  "/sounds/vent3.mp3",
-  "/sounds/vent4.mp3",
-  "/sounds/vent5.mp3",
-  "/sounds/vent6.mp3",
-];
+const ESCAPE_LINES = ["정보 수집 성공함.", "복귀.", "b1h1xnd"];
 
-function randomOf<T>(arr: readonly T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)] as T;
+function randomOf<T>(arr: T[]) {
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -199,7 +192,6 @@ export default function App() {
   const moveTimerRef = useRef<number | null>(null);
   const behindTimerRef = useRef<number | null>(null);
   const sameRoomTimerRef = useRef<number | null>(null);
-  const adjacentAttackTimerRef = useRef<number | null>(null);
   const escapeTimerRef = useRef<number | null>(null);
   const emergencyTimerRef = useRef<number | null>(null);
   const switchStaticTimerRef = useRef<number | null>(null);
@@ -437,7 +429,6 @@ export default function App() {
     if (moveTimerRef.current) clearTimeout(moveTimerRef.current);
     if (behindTimerRef.current) clearTimeout(behindTimerRef.current);
     if (sameRoomTimerRef.current) clearTimeout(sameRoomTimerRef.current);
-    if (adjacentAttackTimerRef.current) clearTimeout(adjacentAttackTimerRef.current);
     if (escapeTimerRef.current) clearTimeout(escapeTimerRef.current);
     if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current);
     if (switchStaticTimerRef.current) clearTimeout(switchStaticTimerRef.current);
@@ -655,22 +646,21 @@ function stopEscapeAudio() {
     setDeathFade(true);
     setEmergencyBlink(false);
 
-    setIsMoving(false);
-    setIsScanning(false);
-    setEscapeActive(false);
-    setEscapeStartedAt(null);
-    setEscapeWhiteFade(false);
-    setSameRoomWarning(false);
-    setSameRoomDeadline(null);
-    setSameRoomCause(null);
-
-    sameRoomWarningRef.current = false;
-    sameRoomCauseRef.current = null;
-
-    window.setTimeout(() => {
+    setTimeout(() => {
       setPhase("dying");
       setStatusText(reason);
-    }, 2000);
+      setIsMoving(false);
+      setIsScanning(false);
+      setEscapeActive(false);
+      setEscapeStartedAt(null);
+      setEscapeWhiteFade(false);
+      setSameRoomWarning(false);
+      setSameRoomDeadline(null);
+      setSameRoomCause(null);
+
+      sameRoomWarningRef.current = false;
+      sameRoomCauseRef.current = null;
+    }, 1200);
   }
 
   function startSameRoomWarning(cause: Exclude<SameRoomCause, null>) {
@@ -682,7 +672,6 @@ function stopEscapeAudio() {
     const deadline = Date.now() + grace;
 
     if (sameRoomTimerRef.current) clearTimeout(sameRoomTimerRef.current);
-    if (adjacentAttackTimerRef.current) clearTimeout(adjacentAttackTimerRef.current);
     if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current);
 
     setSameRoomWarning(true);
@@ -732,36 +721,8 @@ function stopEscapeAudio() {
     }
   }
 
-
-  function clearAdjacentAttack() {
-    if (adjacentAttackTimerRef.current) {
-      clearTimeout(adjacentAttackTimerRef.current);
-      adjacentAttackTimerRef.current = null;
-    }
-  }
-
-  function startAdjacentAttack() {
-    if (phaseRef.current !== "playing") return;
-    if (adjacentAttackTimerRef.current) return;
-
-    setStatusText("바로 옆 환풍구에서 금속 긁히는 소리가 멈췄다.");
-
-    adjacentAttackTimerRef.current = window.setTimeout(() => {
-      adjacentAttackTimerRef.current = null;
-
-      if (phaseRef.current !== "playing") return;
-
-      const dist = getDistance(behindRoomRef.current, playerRoomRef.current);
-      if (dist === 1) {
-        triggerDeath("바로 옆에서 들이닥친 적에게 대응하지 못했다.");
-      } else {
-        scheduleBehindMove();
-      }
-    }, 10000);
-  }
-
-  function playVentAudio(src: string, pan: number = 0, targetGain: number = 1) {
-    const audio = new Audio(src);
+  function playVentAudio(pan: number = 0, targetGain: number = 1) {
+    const audio = new Audio("/sounds/vent.mp3");
     audio.loop = false;
     audio.volume = 1;
     audio.preload = "auto";
@@ -820,20 +781,7 @@ function stopEscapeAudio() {
     if (behindTimerRef.current) clearTimeout(behindTimerRef.current);
     if (phaseRef.current !== "playing") return;
 
-    clearAdjacentAttack();
-
     const dist = getDistance(behindRoomRef.current, playerRoomRef.current);
-
-    if (dist === 0) {
-      triggerDeath("적과 같은 구역에서 마주쳤다.");
-      return;
-    }
-
-    if (dist === 1) {
-      startAdjacentAttack();
-      return;
-    }
-
     const delay = getBehindDelay(dist);
 
     behindTimerRef.current = window.setTimeout(() => {
@@ -844,12 +792,10 @@ function stopEscapeAudio() {
       const currentDist = getDistance(currentBehind, currentPlayer);
 
       if (currentDist === 0) {
-        triggerDeath("적과 같은 구역에서 마주쳤다.");
-        return;
-      }
-
-      if (currentDist === 1) {
-        startAdjacentAttack();
+        if (!sameRoomWarningRef.current) {
+          startSameRoomWarning("enemyEnteredPlayerRoom");
+        }
+        scheduleBehindMove();
         return;
       }
 
@@ -860,7 +806,7 @@ function stopEscapeAudio() {
 
         if (dashRoll < 0.05) {
           nextRoom = getTwoStepCloserMove(currentBehind, currentPlayer);
-        } else if (dashRoll < 0.5) {
+        } else if (dashRoll < 0.5){
           nextRoom = getCloserNeighbor(currentBehind, currentPlayer);
         } else {
           nextRoom = randomOf(roomMap[currentBehind].neighbors);
@@ -875,21 +821,22 @@ function stopEscapeAudio() {
         } else {
           nextRoom = randomOf(roomMap[currentBehind].neighbors);
         }
+      } else if (currentDist === 1) {
+        if (Math.random() < 0.35) {
+          nextRoom = currentBehind;
+        } else {
+          nextRoom = getCloserNeighbor(currentBehind, currentPlayer);
+        }
       }
 
       if (nextRoom !== currentBehind) {
         setBehindRoom(nextRoom);
-        behindRoomRef.current = nextRoom;
 
         const dx = roomMap[nextRoom].x - roomMap[currentPlayer].x;
         const pan = dx < 0 ? -0.8 : dx > 0 ? 0.8 : 0;
 
         const afterDistForSound = getDistance(nextRoom, currentPlayer);
-        const stopBehindSound = playVentAudio(
-          randomOf(ENEMY_VENT_SOUNDS),
-          pan,
-          getBehindVentGain(afterDistForSound)
-        );
+        const stopBehindSound = playVentAudio(pan, getBehindVentGain(afterDistForSound));
 
         window.setTimeout(() => {
           stopBehindSound();
@@ -897,14 +844,8 @@ function stopEscapeAudio() {
       }
 
       const afterDist = getDistance(nextRoom, currentPlayer);
-      if (afterDist === 0) {
-        triggerDeath("적과 같은 구역에서 마주쳤다.");
-        return;
-      }
-
-      if (afterDist === 1) {
-        startAdjacentAttack();
-        return;
+      if (afterDist === 0 && !sameRoomWarningRef.current) {
+        startSameRoomWarning("enemyEnteredPlayerRoom");
       }
 
       scheduleBehindMove();
@@ -945,7 +886,7 @@ function stopEscapeAudio() {
     const dx = target.x - current.x;
     const pan = dx < 0 ? -0.8 : dx > 0 ? 0.8 : 0;
 
-    const stopSound = playVentAudio("/sounds/vent.mp3", pan, 0.72);
+    const stopSound = playVentAudio(pan, 1);
     ventStopRef.current = stopSound;
 
     moveTimerRef.current = window.setTimeout(() => {
@@ -960,26 +901,16 @@ function stopEscapeAudio() {
 
       const currentBehind = behindRoomRef.current;
       const overlappedNow = targetId === currentBehind;
-      const distanceNow = getDistance(targetId, currentBehind);
       const warningNow = sameRoomWarningRef.current;
 
       if (overlappedNow) {
-        triggerDeath("적이 있는 구역으로 이동했다.");
-        return;
+        startSameRoomWarning("playerEnteredEnemyRoom");
+        setStatusText("위험 구역에 직접 진입했다. 5초 안에 벗어나라.");
       } else {
-        clearAdjacentAttack();
-
         if (warningNow) {
           clearSameRoomWarning();
         }
-
-        if (distanceNow === 1) {
-          startAdjacentAttack();
-          setStatusText("바로 옆 환풍구 너머에서 숨소리가 들린다.");
-        } else {
-          scheduleBehindMove();
-          setStatusText(roomMap[targetId].flavor ?? "금속 표면이 미세하게 울린다.");
-        }
+        setStatusText(roomMap[targetId].flavor ?? "금속 표면이 미세하게 울린다.");
       }
     }, MOVE_TIME);
   }
@@ -1189,10 +1120,10 @@ function stopEscapeAudio() {
         }
 
         @keyframes deathRedFade {
-          0% { background: rgba(90, 0, 0, 0); }
-          35% { background: rgba(170, 0, 0, 0.35); }
-          70% { background: rgba(215, 0, 0, 0.68); }
-          100% { background: rgba(255, 0, 0, 0.92); }
+          0% { background: rgba(255, 0, 0, 0); }
+          20% { background: rgba(255, 0, 0, 0.85); }
+          60% { background: rgba(120, 0, 0, 0.92); }
+          100% { background: rgba(0, 0, 0, 1); }
         }
 
         @keyframes moveBoardBlink {
@@ -1566,7 +1497,7 @@ function stopEscapeAudio() {
   );
 }
 
-const styles: Record<string, CSSProperties> = {
+const styles: Record<string, React.CSSProperties> = {
   app: {
     minHeight: "100vh",
     background: "#0b0f14",
@@ -2014,7 +1945,7 @@ const styles: Record<string, CSSProperties> = {
     inset: 0,
     pointerEvents: "none",
     zIndex: 22,
-    animation: "deathRedFade 2s ease forwards",
+    animation: "deathRedFade 1.6s ease forwards",
     transition: "opacity 0.2s ease",
   },
 
