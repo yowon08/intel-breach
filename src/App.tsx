@@ -3,8 +3,6 @@ import { rooms, corridorSegments, startRooms, roomMap } from "./data/mapData";
 
 type ViewMode = "map" | "tablet";
 type GamePhase = "boot" | "playing" | "dying" | "escaped";
-type EnemyMode = "wander" | "alerted" | "attackWindup";
-
 type DetectionResult = {
   visible: boolean;
   roomId: string | null;
@@ -18,7 +16,6 @@ type ProgressState = {
 };
 
 type SameRoomCause = "playerEnteredEnemyRoom" | "enemyEnteredPlayerRoom" | null;
-type DeathSequenceType = "playerEnter" | "enemyEnter" | "scanReveal" | null;
 
 const ROOM_WIDTH = 100;
 const ROOM_HEIGHT = 70;
@@ -35,26 +32,24 @@ const OFFSET_Y = (BOARD_HEIGHT - MAP_HEIGHT) / 2;
 
 const TASK_SPEED_PER_SEC = 100 / 20;
 const SCAN_TIME = 2000;
+const PLAYER_ENTERED_GRACE = 5000;
+const ENEMY_ENTERED_GRACE = 7000;
 const ESCAPE_TIME = 4000;
 const MOVE_TIME = 3200;
 
-const WANDER_MIN = 6000;
-const WANDER_MAX = 10000;
-const ALERT_MIN = 10000;
-const ALERT_MAX = 16000;
-const ATTACK_WINDUP_MIN = 10000;
-const ATTACK_WINDUP_MAX = 15000;
-const ALERT_MEMORY = 30000;
-
 const BEHIND_START_ROOMS = ["R4", "R8", "R12"];
+
 const ESCAPE_LINES = ["정보 수집 성공함.", "복귀.", "S3CUR3D"];
+const ENEMY_VENT_SOUNDS = [
+  "/sounds/vent2.mp3",
+  "/sounds/vent3.mp3",
+  "/sounds/vent4.mp3",
+  "/sounds/vent5.mp3",
+  "/sounds/vent6.mp3",
+];
 
 function randomOf<T>(arr: T[]) {
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function randomBetween(min: number, max: number) {
-  return min + Math.random() * (max - min);
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -97,6 +92,32 @@ function getCloserNeighbor(fromId: string, targetId: string) {
   return randomOf(candidates);
 }
 
+function getTwoStepCloserMove(fromId: string, targetId: string) {
+  const first = getCloserNeighbor(fromId, targetId);
+  const secondCandidates = roomMap[first].neighbors.filter((id) => id !== fromId);
+
+  if (secondCandidates.length === 0) return first;
+
+  const scored = secondCandidates.map((id) => ({
+    id,
+    dist: getDistance(id, targetId),
+  }));
+
+  scored.sort((a, b) => a.dist - b.dist);
+  const bestDist = scored[0].dist;
+  const best = scored.filter((x) => x.dist === bestDist).map((x) => x.id);
+
+  return randomOf(best);
+}
+
+function getBehindDelay(distance: number) {
+  if (distance >= 5) return 3000 + Math.random() * 3000;
+  if (distance >= 3) return 4000 + Math.random() * 4000;
+  if (distance === 2) return 4500 + Math.random() * 5000;
+  if (distance === 1) return 5000 + Math.random() * 6000;
+  return 3000 + Math.random() * 3000;
+}
+
 function getTaskKeyByRoom(roomId: string): keyof ProgressState | null {
   const type = roomMap[roomId].type;
   if (type === "dataA") return "A";
@@ -113,14 +134,6 @@ function totalProgress(progress: ProgressState) {
   return Math.floor((progress.A + progress.B + progress.C) / 3);
 }
 
-function roomCenter(roomId: string) {
-  const room = roomMap[roomId];
-  return {
-    x: room.x * GAP_X + OFFSET_X + ROOM_WIDTH / 2,
-    y: room.y * GAP_Y + OFFSET_Y + ROOM_HEIGHT / 2,
-  };
-}
-
 export default function App() {
   const initialPlayer = useMemo(() => randomOf(startRooms), []);
   const initialBehind = useMemo(() => getSafeInitialBehind(initialPlayer), [initialPlayer]);
@@ -135,7 +148,11 @@ export default function App() {
   const [isMoving, setIsMoving] = useState(false);
   const [moveTarget, setMoveTarget] = useState<string | null>(null);
 
-  const [progress, setProgress] = useState<ProgressState>({ A: 0, B: 0, C: 0 });
+  const [progress, setProgress] = useState<ProgressState>({
+    A: 0,
+    B: 0,
+    C: 0,
+  });
 
   const [statusText, setStatusText] = useState("환풍구 안 공기가 눅눅하다.");
   const [dangerText, setDangerText] = useState("탐지 없이는 위치를 특정할 수 없다.");
@@ -148,10 +165,9 @@ export default function App() {
     fakeRoomIds: [],
   });
 
+  const [sameRoomWarning, setSameRoomWarning] = useState(false);
+  const [sameRoomDeadline, setSameRoomDeadline] = useState<number | null>(null);
   const [sameRoomCause, setSameRoomCause] = useState<SameRoomCause>(null);
-
-  const [enemyMode, setEnemyMode] = useState<EnemyMode>("wander");
-  const [enemyAlertUntil, setEnemyAlertUntil] = useState<number | null>(null);
 
   const [escapeActive, setEscapeActive] = useState(false);
   const [escapeStartedAt, setEscapeStartedAt] = useState<number | null>(null);
@@ -161,48 +177,42 @@ export default function App() {
   const [meltdownVisual, setMeltdownVisual] = useState(false);
 
   const [screenStatic, setScreenStatic] = useState(false);
+  const [emergencyBlink, setEmergencyBlink] = useState(false);
   const [deathFade, setDeathFade] = useState(false);
   const [escapeBlueFade, setEscapeBlueFade] = useState(false);
   const [escapeWhiteFade, setEscapeWhiteFade] = useState(false);
 
-  const [deathBlueGlitch, setDeathBlueGlitch] = useState(false);
-  const [deathSplit, setDeathSplit] = useState(false);
-  const [deathPending, setDeathPending] = useState(false);
-  const [deathSequenceType, setDeathSequenceType] = useState<DeathSequenceType>(null);
-  const [deathFocusRoom, setDeathFocusRoom] = useState<string | null>(null);
-  const [deathPlayerPathProgress, setDeathPlayerPathProgress] = useState(0);
-  const [deathEnemyFlash, setDeathEnemyFlash] = useState(false);
-
   const [escapeTypedLines, setEscapeTypedLines] = useState<string[]>(["", "", ""]);
-
   const escapeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const playerRoomRef = useRef(playerRoom);
+  const behindRoomRef = useRef(behindRoom);
+  const phaseRef = useRef(phase);
+  const sameRoomWarningRef = useRef(sameRoomWarning);
+  const sameRoomCauseRef = useRef<SameRoomCause>(sameRoomCause);
+
   const scanAudioRef = useRef<HTMLAudioElement | null>(null);
   const chargeAudioRef = useRef<HTMLAudioElement | null>(null);
   const chargeRoomRef = useRef<string | null>(null);
   const chargeTimeByRoomRef = useRef<Record<string, number>>({});
   const prevProgressRef = useRef<ProgressState>({ A: 0, B: 0, C: 0 });
 
-  const playerRoomRef = useRef(playerRoom);
-  const behindRoomRef = useRef(behindRoom);
-  const phaseRef = useRef(phase);
-  const sameRoomCauseRef = useRef<SameRoomCause>(sameRoomCause);
-  const enemyModeRef = useRef<EnemyMode>(enemyMode);
-  const enemyAlertUntilRef = useRef<number | null>(enemyAlertUntil);
-  const viewModeRef = useRef<ViewMode>(viewMode);
-  const deathPendingRef = useRef(false);
-
   const moveTimerRef = useRef<number | null>(null);
-  const enemyTimerRef = useRef<number | null>(null);
+  const behindTimerRef = useRef<number | null>(null);
+  const sameRoomTimerRef = useRef<number | null>(null);
+  const adjacentAttackTimerRef = useRef<number | null>(null);
   const escapeTimerRef = useRef<number | null>(null);
+  const emergencyTimerRef = useRef<number | null>(null);
   const switchStaticTimerRef = useRef<number | null>(null);
   const typingTimersRef = useRef<number[]>([]);
-  const deathSequenceTimerRefs = useRef<number[]>([]);
   const ventStopRef = useRef<null | (() => void)>(null);
   const rafRef = useRef<number | null>(null);
   const lastFrameRef = useRef(performance.now());
 
   const hasViewModeMountedRef = useRef(false);
   const bgmRef = useRef<HTMLAudioElement | null>(null);
+  const warningAudioRef = useRef<HTMLAudioElement | null>(null);
+  const heartbeatRef = useRef<HTMLAudioElement | null>(null);
+  const heartbeatRateIntervalRef = useRef<number | null>(null);
 
   const currentRoom = roomMap[playerRoom];
   const finished = allTasksDone(progress);
@@ -214,26 +224,20 @@ export default function App() {
     viewMode === "tablet" &&
     !isMoving &&
     !isScanning &&
+    !sameRoomWarning &&
     !escapeActive &&
-    !deathPending &&
-    !sameRoomCause &&
     !!currentTaskKey &&
     progress[currentTaskKey] < 100;
+
+  const sameRoomSeconds =
+    sameRoomDeadline == null
+      ? 0
+      : Math.max(0, Math.ceil((sameRoomDeadline - Date.now()) / 1000));
 
   const escapeSeconds =
     escapeStartedAt == null
       ? 0
       : Math.max(0, Math.ceil((ESCAPE_TIME - (Date.now() - escapeStartedAt)) / 1000));
-
-  const deathPathFrom = moveTarget ? roomCenter(playerRoom) : null;
-  const deathPathTo = moveTarget ? roomCenter(moveTarget) : null;
-  const deathMovingDot =
-    deathSequenceType === "playerEnter" && deathPathFrom && deathPathTo
-      ? {
-          x: deathPathFrom.x + (deathPathTo.x - deathPathFrom.x) * deathPlayerPathProgress,
-          y: deathPathFrom.y + (deathPathTo.y - deathPathFrom.y) * deathPlayerPathProgress,
-        }
-      : null;
 
   useEffect(() => {
     playerRoomRef.current = playerRoom;
@@ -248,24 +252,12 @@ export default function App() {
   }, [phase]);
 
   useEffect(() => {
+    sameRoomWarningRef.current = sameRoomWarning;
+  }, [sameRoomWarning]);
+
+  useEffect(() => {
     sameRoomCauseRef.current = sameRoomCause;
   }, [sameRoomCause]);
-
-  useEffect(() => {
-    enemyModeRef.current = enemyMode;
-  }, [enemyMode]);
-
-  useEffect(() => {
-    enemyAlertUntilRef.current = enemyAlertUntil;
-  }, [enemyAlertUntil]);
-
-  useEffect(() => {
-    viewModeRef.current = viewMode;
-  }, [viewMode]);
-
-  useEffect(() => {
-    deathPendingRef.current = deathPending;
-  }, [deathPending]);
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -307,13 +299,16 @@ export default function App() {
       const delta = (now - lastFrameRef.current) / 1000;
       lastFrameRef.current = now;
 
-      if (!isMoving && !isScanning && !deathPending && viewMode === "tablet") {
+      if (!isMoving && !isScanning && !sameRoomWarning && viewMode === "tablet") {
         const taskKey = getTaskKeyByRoom(playerRoomRef.current);
-        if (taskKey && !sameRoomCauseRef.current) {
+        if (taskKey) {
           setProgress((prev) => {
             const nextValue = clamp(prev[taskKey] + TASK_SPEED_PER_SEC * delta, 0, 100);
             if (nextValue !== prev[taskKey]) {
-              return { ...prev, [taskKey]: nextValue };
+              return {
+                ...prev,
+                [taskKey]: nextValue,
+              };
             }
             return prev;
           });
@@ -328,7 +323,7 @@ export default function App() {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [phase, isMoving, isScanning, viewMode, deathPending]);
+  }, [phase, isMoving, isScanning, sameRoomWarning, viewMode]);
 
   useEffect(() => {
     if (phase !== "playing") return;
@@ -340,37 +335,26 @@ export default function App() {
   useEffect(() => {
     if (phase !== "playing") return;
 
-    if (deathPending) {
-      setDangerText("푸른 글리치가 화면을 찢는다.");
-      return;
-    }
-
-    if (sameRoomCause === "enemyEnteredPlayerRoom") {
-      setDangerText("같은 방에 있다. 탐지를 제외한 행동은 즉시 위험하다.");
+    if (sameRoomWarning) {
+      setDangerText(
+        sameRoomCause === "playerEnteredEnemyRoom"
+          ? "위험 구역에 직접 진입했다. 즉시 이탈하라"
+          : "적이 같은 구역으로 침입했다. 즉시 이탈하라"
+      );
       return;
     }
 
     if (isScanning) {
-      setDangerText("탐지기가 규칙적으로 작동 중이다.");
-      return;
-    }
-
-    if (enemyMode === "attackWindup") {
-      setDangerText("바로 앞에서 무언가가 숨을 고른다.");
-      return;
-    }
-
-    if (enemyMode === "alerted") {
-      setDangerText("적이 네 위치를 의식하고 있다.");
+      setDangerText("탐지기가 규칙적으로 작동 중이다");
       return;
     }
 
     if (viewMode === "tablet") {
-      setDangerText("태블릿 잡음 속에서 데이터가 흐른다.");
+      setDangerText("태블릿 잡음 속에서 데이터가 흐른다");
     } else {
-      setDangerText("탐지 없이는 위치를 특정할 수 없다.");
+      setDangerText("탐지 없이는 위치를 특정할 수 없다");
     }
-  }, [sameRoomCause, isScanning, phase, viewMode, enemyMode, deathPending]);
+  }, [sameRoomWarning, isScanning, phase, viewMode, sameRoomCause]);
 
   useEffect(() => {
     return () => cleanupTimers();
@@ -423,7 +407,6 @@ export default function App() {
   useEffect(() => {
     if (isTabletCollecting) {
       playChargeAudio(playerRoom);
-      signalEnemyAwareness("tablet");
     } else {
       stopChargeAudio(true);
     }
@@ -445,23 +428,20 @@ export default function App() {
     };
   }, [progress]);
 
-  useEffect(() => {
-    if (phase !== "playing") return;
-    scheduleEnemyAction();
-
-    return () => {
-      if (enemyTimerRef.current) clearTimeout(enemyTimerRef.current);
-    };
-  }, [phase, enemyMode, enemyAlertUntil, playerRoom, behindRoom, deathPending, sameRoomCause]);
-
   function cleanupTimers() {
+    if (scanAudioRef.current) {
+      scanAudioRef.current.pause();
+      scanAudioRef.current.currentTime = 0;
+      scanAudioRef.current = null;
+    }
     if (moveTimerRef.current) clearTimeout(moveTimerRef.current);
-    if (enemyTimerRef.current) clearTimeout(enemyTimerRef.current);
+    if (behindTimerRef.current) clearTimeout(behindTimerRef.current);
+    if (sameRoomTimerRef.current) clearTimeout(sameRoomTimerRef.current);
+    if (adjacentAttackTimerRef.current) clearTimeout(adjacentAttackTimerRef.current);
     if (escapeTimerRef.current) clearTimeout(escapeTimerRef.current);
+    if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current);
     if (switchStaticTimerRef.current) clearTimeout(switchStaticTimerRef.current);
-
-    deathSequenceTimerRefs.current.forEach((id) => clearTimeout(id));
-    deathSequenceTimerRefs.current = [];
+    if (heartbeatRateIntervalRef.current) clearInterval(heartbeatRateIntervalRef.current);
 
     typingTimersRef.current.forEach((id) => clearTimeout(id));
     typingTimersRef.current = [];
@@ -473,17 +453,73 @@ export default function App() {
 
     stopScanAudio();
     stopChargeAudio(true);
-    stopEscapeAudio();
+    stopWarningAudio();
+    stopHeartbeat();
   }
 
   function triggerScreenStatic(duration = 220) {
     setScreenStatic(true);
 
-    if (switchStaticTimerRef.current) clearTimeout(switchStaticTimerRef.current);
+    if (switchStaticTimerRef.current) {
+      clearTimeout(switchStaticTimerRef.current);
+    }
 
     switchStaticTimerRef.current = window.setTimeout(() => {
       setScreenStatic(false);
     }, duration);
+  }
+
+  function stopWarningAudio() {
+    if (warningAudioRef.current) {
+      warningAudioRef.current.pause();
+      warningAudioRef.current.currentTime = 0;
+      warningAudioRef.current = null;
+    }
+  }
+
+  function playWarningAudio() {
+    stopWarningAudio();
+
+    const audio = new Audio("/sounds/bisang.mp3");
+    audio.loop = true;
+    audio.volume = 0.3;
+    audio.play().catch(() => {});
+    warningAudioRef.current = audio;
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatRateIntervalRef.current) {
+      clearInterval(heartbeatRateIntervalRef.current);
+      heartbeatRateIntervalRef.current = null;
+    }
+
+    if (heartbeatRef.current) {
+      heartbeatRef.current.pause();
+      heartbeatRef.current.currentTime = 0;
+      heartbeatRef.current = null;
+    }
+  }
+
+  function startHeartbeat(deadline: number) {
+    stopHeartbeat();
+
+    const audio = new Audio("/sounds/heartbeat.mp3");
+    audio.loop = true;
+    audio.volume = 1;
+    audio.playbackRate = 1.05;
+    audio.play().catch(() => {});
+    heartbeatRef.current = audio;
+
+    heartbeatRateIntervalRef.current = window.setInterval(() => {
+      if (!heartbeatRef.current) return;
+
+      const remain = deadline - Date.now();
+
+      if (remain <= 2000) heartbeatRef.current.playbackRate = 1.8;
+      else if (remain <= 3500) heartbeatRef.current.playbackRate = 1.5;
+      else if (remain <= 5000) heartbeatRef.current.playbackRate = 1.3;
+      else heartbeatRef.current.playbackRate = 1.05;
+    }, 180);
   }
 
   function stopScanAudio() {
@@ -496,21 +532,22 @@ export default function App() {
 
   function playScanAudio() {
     stopScanAudio();
+
     const audio = new Audio("/sounds/scan.mp3");
+    audio.loop = false;
     audio.volume = 0.9;
     audio.play().catch(() => {});
     scanAudioRef.current = audio;
   }
-
   function playCheck2Audio() {
-    const audio = new Audio("/sounds/check2.mp3");
-    audio.volume = 0.95;
-    audio.play().catch(() => {});
-  }
-
+  const audio = new Audio("/sounds/check2.mp3");
+  audio.volume = 0.95;
+  audio.play().catch(() => {});
+}
   function stopChargeAudio(savePosition = true) {
     if (chargeAudioRef.current) {
       const currentRoomId = chargeRoomRef.current;
+
       if (savePosition && currentRoomId) {
         chargeTimeByRoomRef.current[currentRoomId] = chargeAudioRef.current.currentTime || 0;
       }
@@ -525,6 +562,7 @@ export default function App() {
 
   function playChargeAudio(roomId: string) {
     const savedTime = chargeTimeByRoomRef.current[roomId] ?? 0;
+
     if (chargeAudioRef.current && chargeRoomRef.current === roomId) return;
 
     stopChargeAudio(true);
@@ -569,24 +607,24 @@ export default function App() {
     audio.volume = 1;
     audio.play().catch(() => {});
   }
-
   function playEscapeAudio() {
-    stopEscapeAudio();
-    const audio = new Audio("/sounds/escape.mp3");
-    audio.loop = true;
-    audio.volume = 1;
-    audio.play().catch(() => {});
-    escapeAudioRef.current = audio;
-  }
+  stopEscapeAudio();
 
-  function stopEscapeAudio() {
-    if (escapeAudioRef.current) {
-      escapeAudioRef.current.pause();
-      escapeAudioRef.current.currentTime = 0;
-      escapeAudioRef.current = null;
-    }
-  }
+  const audio = new Audio("/sounds/escape.mp3");
+  audio.loop = true;
+  audio.volume = 1;
+  audio.play().catch(() => {});
 
+  escapeAudioRef.current = audio;
+}
+
+function stopEscapeAudio() {
+  if (escapeAudioRef.current) {
+    escapeAudioRef.current.pause();
+    escapeAudioRef.current.currentTime = 0;
+    escapeAudioRef.current = null;
+  }
+}
   function ensureBgmStarted() {
     if (!bgmRef.current) return;
     if (bgmRef.current.paused) {
@@ -594,8 +632,136 @@ export default function App() {
     }
   }
 
-  function playSpatialAudio(filePath: string, pan: number, volume: number, randomSegment = true) {
-    const audio = new Audio(filePath);
+  function getBehindVentGain(distance: number) {
+    if (distance <= 0) return 1.55;
+    if (distance === 1) return 1.4;
+    if (distance === 2) return 1.15;
+    if (distance === 3) return 0.9;
+    return 0.62;
+  }
+
+  function triggerDeath(reason: string) {
+    if (phaseRef.current !== "playing") return;
+
+    cleanupTimers();
+
+    if (bgmRef.current) {
+      bgmRef.current.pause();
+      bgmRef.current.currentTime = 0;
+    }
+
+    setScreenStatic(true);
+    playDieSound();
+    setDeathFade(true);
+    setEmergencyBlink(false);
+
+    setIsMoving(false);
+    setIsScanning(false);
+    setEscapeActive(false);
+    setEscapeStartedAt(null);
+    setEscapeWhiteFade(false);
+    setSameRoomWarning(false);
+    setSameRoomDeadline(null);
+    setSameRoomCause(null);
+
+    sameRoomWarningRef.current = false;
+    sameRoomCauseRef.current = null;
+
+    window.setTimeout(() => {
+      setPhase("dying");
+      setStatusText(reason);
+    }, 2000);
+  }
+
+  function startSameRoomWarning(cause: Exclude<SameRoomCause, null>) {
+    if (phaseRef.current !== "playing") return;
+    if (sameRoomWarningRef.current) return;
+
+    const grace =
+      cause === "playerEnteredEnemyRoom" ? PLAYER_ENTERED_GRACE : ENEMY_ENTERED_GRACE;
+    const deadline = Date.now() + grace;
+
+    if (sameRoomTimerRef.current) clearTimeout(sameRoomTimerRef.current);
+    if (adjacentAttackTimerRef.current) clearTimeout(adjacentAttackTimerRef.current);
+    if (emergencyTimerRef.current) clearTimeout(emergencyTimerRef.current);
+
+    setSameRoomWarning(true);
+    setSameRoomDeadline(deadline);
+    setSameRoomCause(cause);
+    sameRoomWarningRef.current = true;
+    sameRoomCauseRef.current = cause;
+
+    setStatusText(
+      cause === "playerEnteredEnemyRoom"
+        ? "위험 구역에 직접 진입했다. 5초 안에 벗어나라."
+        : "같은 구역 침입 감지. 7초 안에 벗어나라."
+    );
+
+    playWarningAudio();
+    startHeartbeat(deadline);
+    setEmergencyBlink(true);
+
+    sameRoomTimerRef.current = window.setTimeout(() => {
+      triggerDeath("비명도 못 지른 채 시야가 붉게 잠겼다.");
+    }, grace);
+  }
+
+  function clearSameRoomWarning() {
+    if (sameRoomTimerRef.current) {
+      clearTimeout(sameRoomTimerRef.current);
+      sameRoomTimerRef.current = null;
+    }
+
+    if (emergencyTimerRef.current) {
+      clearTimeout(emergencyTimerRef.current);
+      emergencyTimerRef.current = null;
+    }
+
+    setSameRoomWarning(false);
+    setSameRoomDeadline(null);
+    setSameRoomCause(null);
+    sameRoomWarningRef.current = false;
+    sameRoomCauseRef.current = null;
+
+    setEmergencyBlink(false);
+    stopWarningAudio();
+    stopHeartbeat();
+
+    if (phaseRef.current === "playing") {
+      scheduleBehindMove();
+    }
+  }
+
+
+  function clearAdjacentAttack() {
+    if (adjacentAttackTimerRef.current) {
+      clearTimeout(adjacentAttackTimerRef.current);
+      adjacentAttackTimerRef.current = null;
+    }
+  }
+
+  function startAdjacentAttack() {
+    if (phaseRef.current !== "playing") return;
+    if (adjacentAttackTimerRef.current) return;
+
+    setStatusText("바로 옆 환풍구에서 금속 긁히는 소리가 멈췄다.");
+
+    adjacentAttackTimerRef.current = window.setTimeout(() => {
+      adjacentAttackTimerRef.current = null;
+
+      if (phaseRef.current !== "playing") return;
+
+      const dist = getDistance(behindRoomRef.current, playerRoomRef.current);
+      if (dist === 1) {
+        triggerDeath("바로 옆에서 들이닥친 적에게 대응하지 못했다.");
+      } else {
+        scheduleBehindMove();
+      }
+    }, 10000);
+  }
+
+  function playVentAudio(src: string, pan: number = 0, targetGain: number = 1) {
+    const audio = new Audio(src);
     audio.loop = false;
     audio.volume = 1;
     audio.preload = "auto";
@@ -608,31 +774,33 @@ export default function App() {
     const gain = ctx.createGain();
 
     panner.pan.setValueAtTime(pan, ctx.currentTime);
+
     gain.gain.setValueAtTime(0.0001, ctx.currentTime);
-    gain.gain.linearRampToValueAtTime(volume, ctx.currentTime + 0.12);
+    gain.gain.linearRampToValueAtTime(targetGain, ctx.currentTime + 0.18);
 
     source.connect(gain);
     gain.connect(panner);
     panner.connect(ctx.destination);
 
-    const playNow = () => {
-      try {
-        if (randomSegment && Number.isFinite(audio.duration) && audio.duration > 2.5) {
-          const maxStart = Math.max(0, audio.duration - 2.2);
-          audio.currentTime = Math.random() * maxStart;
-        }
-      } catch {}
+    const SAFE_START_MIN = 1.5;
+    const SAFE_START_MAX = 14.0;
+
+    const playRandomSegment = () => {
+      const startTime =
+        SAFE_START_MIN + Math.random() * (SAFE_START_MAX - SAFE_START_MIN);
+      audio.currentTime = startTime;
       audio.play().catch(() => {});
     };
 
     if (audio.readyState >= 1) {
-      playNow();
+      playRandomSegment();
     } else {
-      audio.addEventListener("loadedmetadata", playNow, { once: true });
+      audio.addEventListener("loadedmetadata", playRandomSegment, { once: true });
     }
 
     return () => {
       const now = ctx.currentTime;
+
       gain.gain.cancelScheduledValues(now);
       gain.gain.setValueAtTime(gain.gain.value, now);
       gain.gain.linearRampToValueAtTime(0.0001, now + 0.12);
@@ -644,372 +812,118 @@ export default function App() {
         gain.disconnect();
         panner.disconnect();
         ctx.close();
-      }, 150);
+      }, 140);
     };
   }
 
-  function playPlayerMoveAudio(pan: number) {
-    return playSpatialAudio("/sounds/vent.mp3", pan, 0.12, true);
-  }
-
-  function playEnemyMoveAudio(nextRoom: string, currentPlayer: string) {
-    const files = [
-      "/sounds/vent2.mp3",
-      "/sounds/vent3.mp3",
-      "/sounds/vent4.mp3",
-      "/sounds/vent5.mp3",
-      "/sounds/vent6.mp3",
-    ];
-
-    const dx = roomMap[nextRoom].x - roomMap[currentPlayer].x;
-    const pan = dx < 0 ? -0.8 : dx > 0 ? 0.8 : 0;
-    const distance = getDistance(nextRoom, currentPlayer);
-
-    const volume =
-      distance <= 0
-        ? 1
-        : distance === 1
-        ? 0.92
-        : distance === 2
-        ? 0.75
-        : distance === 3
-        ? 0.58
-        : 0.42;
-
-    return playSpatialAudio(randomOf(files), pan, volume, true);
-  }
-
-  function clearDeathEffects() {
-    setDeathBlueGlitch(false);
-    setDeathSplit(false);
-    setDeathFade(false);
-    setDeathPending(false);
-    setDeathSequenceType(null);
-    setDeathFocusRoom(null);
-    setDeathPlayerPathProgress(0);
-    setDeathEnemyFlash(false);
-    deathPendingRef.current = false;
-  }
-
-  function finishDeath(reason: string) {
-    if (bgmRef.current) {
-      bgmRef.current.pause();
-      bgmRef.current.currentTime = 0;
-    }
-
-    setPhase("dying");
-    setStatusText(reason);
-    setSameRoomCause(null);
-    sameRoomCauseRef.current = null;
-  }
-
-  function startPlayerEnterDeathSequence(reason: string) {
-    if (phaseRef.current !== "playing" || deathPendingRef.current) return;
-
-    deathPendingRef.current = true;
-    setDeathPending(true);
-    setDeathSequenceType("playerEnter");
-    setStatusText("환풍구 끝이 검게 잠긴다.");
-    stopScanAudio();
-    stopChargeAudio(true);
-    stopEscapeAudio();
-
-    if (enemyTimerRef.current) {
-      clearTimeout(enemyTimerRef.current);
-      enemyTimerRef.current = null;
-    }
-
-    setIsMoving(false);
-
-    const t0 = window.setTimeout(() => {
-      setDeathPlayerPathProgress(0.06);
-    }, 80);
-
-    const t1 = window.setTimeout(() => {
-      setDeathPlayerPathProgress(0.22);
-    }, 300);
-
-    const t2 = window.setTimeout(() => {
-      setDeathPlayerPathProgress(0.42);
-    }, 650);
-
-    const t3 = window.setTimeout(() => {
-      setDeathPlayerPathProgress(0.7);
-    }, 1050);
-
-    const t4 = window.setTimeout(() => {
-      setDeathPlayerPathProgress(1);
-      setDeathEnemyFlash(true);
-    }, 1450);
-
-    const t5 = window.setTimeout(() => {
-      setDeathBlueGlitch(true);
-      setDeathSplit(true);
-      setScreenStatic(true);
-      setStatusText("푸른 글리치가 화면을 찢는다.");
-    }, 1650);
-
-    const t6 = window.setTimeout(() => {
-      playDieSound();
-      setDeathFade(true);
-    }, 3650);
-
-    const t7 = window.setTimeout(() => {
-      finishDeath(reason);
-    }, 4700);
-
-    deathSequenceTimerRefs.current.push(t0, t1, t2, t3, t4, t5, t6, t7);
-  }
-
-  function startEnemyEnteredInteractionDeath(reason: string) {
-    if (phaseRef.current !== "playing" || deathPendingRef.current) return;
-
-    deathPendingRef.current = true;
-    setDeathPending(true);
-    setDeathSequenceType("enemyEnter");
-    setDeathFocusRoom(playerRoomRef.current);
-    stopScanAudio();
-    stopChargeAudio(true);
-    stopEscapeAudio();
-
-    if (enemyTimerRef.current) {
-      clearTimeout(enemyTimerRef.current);
-      enemyTimerRef.current = null;
-    }
-
-    setStatusText("지금 있는 방만 남고 모든 인터페이스가 검게 가라앉는다.");
-
-    const t1 = window.setTimeout(() => {
-      setDeathBlueGlitch(true);
-      setDeathSplit(true);
-      setScreenStatic(true);
-      setStatusText("푸른 금이 간 듯 화면이 좌우로 갈라진다.");
-    }, 500);
-
-    const t2 = window.setTimeout(() => {
-      playDieSound();
-      setDeathFade(true);
-    }, 2500);
-
-    const t3 = window.setTimeout(() => {
-      finishDeath(reason);
-    }, 3500);
-
-    deathSequenceTimerRefs.current.push(t1, t2, t3);
-  }
-
-  function startScanRevealDeath(reason: string) {
-    if (phaseRef.current !== "playing" || deathPendingRef.current) return;
-
-    deathPendingRef.current = true;
-    setDeathPending(true);
-    setDeathSequenceType("scanReveal");
-    setDeathFocusRoom(playerRoomRef.current);
-    stopChargeAudio(true);
-    stopEscapeAudio();
-
-    if (enemyTimerRef.current) {
-      clearTimeout(enemyTimerRef.current);
-      enemyTimerRef.current = null;
-    }
-
-    setStatusText("탐지가 끝나는 순간 같은 방의 신호만 남는다.");
-
-    const t1 = window.setTimeout(() => {
-      setDeathBlueGlitch(true);
-      setDeathSplit(true);
-      setScreenStatic(true);
-      setStatusText("푸른 글리치가 액정처럼 금가며 벌어진다.");
-    }, 700);
-
-    const t2 = window.setTimeout(() => {
-      playDieSound();
-      setDeathFade(true);
-    }, 2700);
-
-    const t3 = window.setTimeout(() => {
-      finishDeath(reason);
-    }, 3700);
-
-    deathSequenceTimerRefs.current.push(t1, t2, t3);
-  }
-
-  function signalEnemyAwareness(source: "tablet" | "scan") {
+  function scheduleBehindMove() {
+    if (behindTimerRef.current) clearTimeout(behindTimerRef.current);
     if (phaseRef.current !== "playing") return;
-    if (deathPendingRef.current) return;
-    if (sameRoomCauseRef.current) return;
 
-    if (source === "tablet") {
-      const dist = getDistance(playerRoomRef.current, behindRoomRef.current);
-      if (dist > 2) return;
-    }
+    clearAdjacentAttack();
 
-    const until = Date.now() + ALERT_MEMORY;
-    setEnemyMode("alerted");
-    setEnemyAlertUntil(until);
+    const dist = getDistance(behindRoomRef.current, playerRoomRef.current);
 
-    if (source === "tablet") {
-      setStatusText("태블릿 잡음이 가까운 벤트 안으로 번졌다.");
-    } else {
-      setStatusText("탐지기의 신호가 위치를 드러냈다.");
-    }
-  }
-
-  function scheduleEnemyAction() {
-    if (enemyTimerRef.current) clearTimeout(enemyTimerRef.current);
-    if (phaseRef.current !== "playing") return;
-    if (deathPendingRef.current) return;
-    if (sameRoomCauseRef.current) return;
-
-    const currentBehind = behindRoomRef.current;
-    const currentPlayer = playerRoomRef.current;
-    const dist = getDistance(currentBehind, currentPlayer);
-
-    if (enemyModeRef.current === "wander") {
-      const delay = randomBetween(WANDER_MIN, WANDER_MAX);
-
-      enemyTimerRef.current = window.setTimeout(() => {
-        if (phaseRef.current !== "playing" || deathPendingRef.current || sameRoomCauseRef.current)
-          return;
-
-        const from = behindRoomRef.current;
-        const playerNow = playerRoomRef.current;
-        const neighbors = roomMap[from].neighbors;
-        const nextRoom = randomOf(neighbors);
-
-        setBehindRoom(nextRoom);
-        behindRoomRef.current = nextRoom;
-
-        const stopSound = playEnemyMoveAudio(nextRoom, playerNow);
-        window.setTimeout(() => stopSound(), 760 + Math.random() * 180);
-
-        scheduleEnemyAction();
-      }, delay);
-
+    if (dist === 0) {
+      triggerDeath("적과 같은 구역에서 마주쳤다.");
       return;
     }
 
-    if (enemyModeRef.current === "alerted") {
-      const remain = (enemyAlertUntilRef.current ?? 0) - Date.now();
-      if (remain <= 0) {
-        setEnemyMode("wander");
-        setEnemyAlertUntil(null);
+    if (dist === 1) {
+      startAdjacentAttack();
+      return;
+    }
+
+    const delay = getBehindDelay(dist);
+
+    behindTimerRef.current = window.setTimeout(() => {
+      if (phaseRef.current !== "playing") return;
+
+      const currentBehind = behindRoomRef.current;
+      const currentPlayer = playerRoomRef.current;
+      const currentDist = getDistance(currentBehind, currentPlayer);
+
+      if (currentDist === 0) {
+        triggerDeath("적과 같은 구역에서 마주쳤다.");
         return;
       }
 
-      if (dist === 1) {
-        setEnemyMode("attackWindup");
-        setStatusText("바로 옆 방에서 무언가가 멈춰 섰다.");
+      if (currentDist === 1) {
+        startAdjacentAttack();
         return;
       }
 
-      const delay = randomBetween(ALERT_MIN, ALERT_MAX);
+      let nextRoom = currentBehind;
 
-      enemyTimerRef.current = window.setTimeout(() => {
-        if (phaseRef.current !== "playing" || deathPendingRef.current || sameRoomCauseRef.current)
-          return;
+      if (currentDist >= 3) {
+        const dashRoll = Math.random();
 
-        const alertRemain = (enemyAlertUntilRef.current ?? 0) - Date.now();
-        if (alertRemain <= 0) {
-          setEnemyMode("wander");
-          setEnemyAlertUntil(null);
-          return;
-        }
-
-        const from = behindRoomRef.current;
-        const playerNow = playerRoomRef.current;
-        const nextRoom = getCloserNeighbor(from, playerNow);
-
-        setBehindRoom(nextRoom);
-        behindRoomRef.current = nextRoom;
-
-        const stopSound = playEnemyMoveAudio(nextRoom, playerNow);
-        window.setTimeout(() => stopSound(), 760 + Math.random() * 180);
-
-        if (getDistance(nextRoom, playerNow) === 1) {
-          setEnemyMode("attackWindup");
-          setStatusText("바로 인접한 방까지 접근했다.");
+        if (dashRoll < 0.05) {
+          nextRoom = getTwoStepCloserMove(currentBehind, currentPlayer);
+        } else if (dashRoll < 0.5) {
+          nextRoom = getCloserNeighbor(currentBehind, currentPlayer);
         } else {
-          scheduleEnemyAction();
+          nextRoom = randomOf(roomMap[currentBehind].neighbors);
         }
-      }, delay);
+      } else if (currentDist === 2) {
+        const dashRoll = Math.random();
 
-      return;
-    }
+        if (dashRoll < 0.06) {
+          nextRoom = getTwoStepCloserMove(currentBehind, currentPlayer);
+        } else if (dashRoll < 0.78) {
+          nextRoom = getCloserNeighbor(currentBehind, currentPlayer);
+        } else {
+          nextRoom = randomOf(roomMap[currentBehind].neighbors);
+        }
+      }
 
-    if (enemyModeRef.current === "attackWindup") {
-      if (dist !== 1) {
-        setEnemyMode("wander");
-        setEnemyAlertUntil(null);
+      if (nextRoom !== currentBehind) {
+        setBehindRoom(nextRoom);
+        behindRoomRef.current = nextRoom;
+
+        const dx = roomMap[nextRoom].x - roomMap[currentPlayer].x;
+        const pan = dx < 0 ? -0.8 : dx > 0 ? 0.8 : 0;
+
+        const afterDistForSound = getDistance(nextRoom, currentPlayer);
+        const stopBehindSound = playVentAudio(
+          randomOf(ENEMY_VENT_SOUNDS),
+          pan,
+          getBehindVentGain(afterDistForSound)
+        );
+
+        window.setTimeout(() => {
+          stopBehindSound();
+        }, 850 + Math.random() * 220);
+      }
+
+      const afterDist = getDistance(nextRoom, currentPlayer);
+      if (afterDist === 0) {
+        triggerDeath("적과 같은 구역에서 마주쳤다.");
         return;
       }
 
-      const delay = randomBetween(ATTACK_WINDUP_MIN, ATTACK_WINDUP_MAX);
-      const targetRoomAtStart = playerRoomRef.current;
+      if (afterDist === 1) {
+        startAdjacentAttack();
+        return;
+      }
 
-      enemyTimerRef.current = window.setTimeout(() => {
-        if (phaseRef.current !== "playing" || deathPendingRef.current || sameRoomCauseRef.current)
-          return;
-
-        const stillAdjacent = getDistance(behindRoomRef.current, playerRoomRef.current) === 1;
-        const playerStillThere = playerRoomRef.current === targetRoomAtStart;
-
-        if (stillAdjacent && playerStillThere) {
-          const invadedRoom = playerRoomRef.current;
-          setBehindRoom(invadedRoom);
-          behindRoomRef.current = invadedRoom;
-          setSameRoomCause("enemyEnteredPlayerRoom");
-          sameRoomCauseRef.current = "enemyEnteredPlayerRoom";
-          setEnemyMode("wander");
-          setEnemyAlertUntil(null);
-
-          const stopSound = playEnemyMoveAudio(invadedRoom, invadedRoom);
-          window.setTimeout(() => stopSound(), 900);
-
-          setStatusText("바로 안으로 들어왔다. 탐지를 제외한 행동은 끝이다.");
-          return;
-        }
-
-        setEnemyMode("wander");
-        setEnemyAlertUntil(null);
-        setStatusText("기척이 멀어졌다.");
-      }, delay);
-    }
+      scheduleBehindMove();
+    }, delay);
   }
 
-  function requestViewMode(nextMode: ViewMode) {
-    ensureBgmStarted();
-
+  useEffect(() => {
     if (phase !== "playing") return;
-    if (isMoving || isScanning || escapeActive || deathPending) return;
-    if (viewMode === nextMode) return;
-
-    if (sameRoomCause === "enemyEnteredPlayerRoom") {
-      startEnemyEnteredInteractionDeath(
-        "같은 방 안에서 화면을 건드린 순간, 바로 곁에 있던 것이 모든 빛을 끊었다."
-      );
-      return;
-    }
-
-    setViewMode(nextMode);
-
-    if (nextMode === "tablet") {
-      signalEnemyAwareness("tablet");
-    }
-  }
+    scheduleBehindMove();
+    return () => {
+      if (behindTimerRef.current) clearTimeout(behindTimerRef.current);
+    };
+  }, [phase]);
 
   function handleMove(targetId: string) {
     ensureBgmStarted();
 
     if (phase !== "playing") return;
-    if (isMoving || isScanning || escapeActive || deathPending) return;
-
-    if (sameRoomCause === "enemyEnteredPlayerRoom") {
-      startEnemyEnteredInteractionDeath(
-        "같은 방 안에서 움직이려던 순간, 바로 옆의 기척이 화면 바깥에서 스며들었다."
-      );
-      return;
-    }
+    if (isMoving || isScanning || escapeActive) return;
 
     const current = rooms.find((r) => r.id === playerRoom);
     if (!current) return;
@@ -1026,33 +940,47 @@ export default function App() {
 
     setIsMoving(true);
     setMoveTarget(targetId);
-    setStatusText("좁은 환풍구를 조심스럽게 기어간다.");
+    setStatusText("좁은 환풍구를 팔꿈치로 기어간다.");
 
     const dx = target.x - current.x;
     const pan = dx < 0 ? -0.8 : dx > 0 ? 0.8 : 0;
 
-    const stopSound = playPlayerMoveAudio(pan);
+    const stopSound = playVentAudio("/sounds/vent.mp3", pan, 0.72);
     ventStopRef.current = stopSound;
 
     moveTimerRef.current = window.setTimeout(() => {
       stopSound();
       ventStopRef.current = null;
 
-      const overlappedNow = targetId === behindRoomRef.current;
-
-      if (overlappedNow) {
-        setMoveTarget(targetId);
-        startPlayerEnterDeathSequence(
-          "환풍구 끝에 도달한 순간 붉은 점이 번쩍였고, 통신은 푸른 균열 속으로 찢겨 사라졌다."
-        );
-        return;
-      }
-
       setPlayerRoom(targetId);
       playerRoomRef.current = targetId;
+
       setIsMoving(false);
       setMoveTarget(null);
-      setStatusText(roomMap[targetId].flavor ?? "금속 표면이 미세하게 울린다.");
+
+      const currentBehind = behindRoomRef.current;
+      const overlappedNow = targetId === currentBehind;
+      const distanceNow = getDistance(targetId, currentBehind);
+      const warningNow = sameRoomWarningRef.current;
+
+      if (overlappedNow) {
+        triggerDeath("적이 있는 구역으로 이동했다.");
+        return;
+      } else {
+        clearAdjacentAttack();
+
+        if (warningNow) {
+          clearSameRoomWarning();
+        }
+
+        if (distanceNow === 1) {
+          startAdjacentAttack();
+          setStatusText("바로 옆 환풍구 너머에서 숨소리가 들린다.");
+        } else {
+          scheduleBehindMove();
+          setStatusText(roomMap[targetId].flavor ?? "금속 표면이 미세하게 울린다.");
+        }
+      }
     }, MOVE_TIME);
   }
 
@@ -1061,7 +989,7 @@ export default function App() {
 
     if (phase !== "playing") return;
     if (viewMode !== "map") return;
-    if (!scanReady || isScanning || isMoving || escapeActive || deathPending) return;
+    if (!scanReady || isScanning || isMoving || escapeActive) return;
 
     setIsScanning(true);
     setScanReady(false);
@@ -1069,8 +997,6 @@ export default function App() {
     playScanAudio();
 
     window.setTimeout(() => {
-      signalEnemyAwareness("scan");
-
       if (finished && !meltdownTriggered) {
         const fakeRoomIds = rooms
           .map((r) => r.id)
@@ -1113,23 +1039,11 @@ export default function App() {
             : "탐지 결과: 2칸 이내 반응 없음."
         );
       }
-
+      
       setIsScanning(false);
       setScanReady(true);
       stopScanAudio();
       playCheck2Audio();
-
-      if (playerRoomRef.current === behindRoomRef.current) {
-        setDetection({
-          visible: true,
-          roomId: playerRoomRef.current,
-          fakeRoomIds: [],
-        });
-        setStatusText("탐지 완료. 같은 방 안의 응답이 하나로 겹친다.");
-        startScanRevealDeath(
-          "탐지가 끝난 직후, 같은 방 안에 있던 것이 마지막으로 남은 화면까지 가르며 사라졌다."
-        );
-      }
     }, SCAN_TIME);
   }
 
@@ -1137,31 +1051,23 @@ export default function App() {
     if (phase !== "playing") return;
     if (!finished) return;
     if (playerRoom !== "R7") return;
-    if (isMoving || isScanning || deathPending) return;
-
-    if (sameRoomCause === "enemyEnteredPlayerRoom") {
-      startEnemyEnteredInteractionDeath(
-        "같은 방 안에서 탈출 장치를 건드린 순간, 눈앞의 방만 남긴 채 사이트 전체가 먹혀 버렸다."
-      );
-      return;
-    }
+    if (isMoving || isScanning || sameRoomWarning) return;
 
     setEscapeActive(true);
     setEscapeStartedAt(Date.now());
     setEscapeWhiteFade(true);
     setStatusText("중앙 탈출 장치를 작동 중이다.");
     playEscapeAudio();
-
     escapeTimerRef.current = window.setTimeout(() => {
-      stopEscapeAudio();
+  stopEscapeAudio();
 
-      if (bgmRef.current) {
-        bgmRef.current.pause();
-        bgmRef.current.currentTime = 0;
-      }
+  if (bgmRef.current) {
+    bgmRef.current.pause();
+    bgmRef.current.currentTime = 0;
+  }
 
-      stopChargeAudio(true);
-      setPhase("escaped");
+  stopChargeAudio(true);
+  setPhase("escaped");
       setEscapeActive(false);
       setStatusText("복귀 신호 송신 완료.");
     }, ESCAPE_TIME);
@@ -1171,8 +1077,8 @@ export default function App() {
     if (!escapeActive) return;
     if (playerRoom !== "R7" || isMoving) {
       if (escapeTimerRef.current) clearTimeout(escapeTimerRef.current);
-      stopEscapeAudio();
-
+       stopEscapeAudio();
+      
       setEscapeActive(false);
       setEscapeStartedAt(null);
       setEscapeWhiteFade(false);
@@ -1202,24 +1108,23 @@ export default function App() {
       roomId: null,
       fakeRoomIds: [],
     });
-
+    setSameRoomWarning(false);
+    setSameRoomDeadline(null);
     setSameRoomCause(null);
+    sameRoomWarningRef.current = false;
     sameRoomCauseRef.current = null;
-
-    setEnemyMode("wander");
-    setEnemyAlertUntil(null);
 
     setEscapeActive(false);
     setEscapeStartedAt(null);
     setMeltdownTriggered(false);
     setMeltdownResolved(false);
     setMeltdownVisual(false);
+    setEmergencyBlink(false);
+    setDeathFade(false);
     setScreenStatic(false);
     setEscapeBlueFade(false);
     setEscapeWhiteFade(false);
     setEscapeTypedLines(["", "", ""]);
-
-    clearDeathEffects();
 
     chargeTimeByRoomRef.current = {};
     chargeRoomRef.current = null;
@@ -1232,10 +1137,18 @@ export default function App() {
 
     playerRoomRef.current = nextPlayer;
     behindRoomRef.current = nextBehind;
+
+    scheduleBehindMove();
   }
 
   return (
-    <div style={styles.app}>
+    <div
+      style={{
+        ...styles.app,
+        animation:
+          escapeActive && phase === "playing" ? "escapeShake 0.16s linear infinite" : "none",
+      }}
+    >
       <style>{`
         @keyframes blinkSlow {
           0%, 100% { opacity: 1; transform: scale(1); }
@@ -1260,6 +1173,11 @@ export default function App() {
           100% { opacity: 0.18; transform: translateX(0); }
         }
 
+        @keyframes redAlarmStrong {
+          0%, 100% { filter: brightness(1) saturate(1); }
+          50% { filter: brightness(1.35) saturate(1.25); }
+        }
+
         @keyframes blueFadePulse {
           0%, 100% { opacity: 0.24; }
           50% { opacity: 0.34; }
@@ -1271,10 +1189,10 @@ export default function App() {
         }
 
         @keyframes deathRedFade {
-          0% { background: rgba(30, 120, 255, 0); }
-          18% { background: rgba(60, 160, 255, 0.35); }
-          55% { background: rgba(0, 55, 120, 0.8); }
-          100% { background: rgba(0, 0, 0, 1); }
+          0% { background: rgba(90, 0, 0, 0); }
+          35% { background: rgba(170, 0, 0, 0.35); }
+          70% { background: rgba(215, 0, 0, 0.68); }
+          100% { background: rgba(255, 0, 0, 0.92); }
         }
 
         @keyframes moveBoardBlink {
@@ -1287,10 +1205,10 @@ export default function App() {
           }
           50% {
             opacity: 0.72;
-            filter: brightness(1.08);
+            filter: brightness(1.18);
             box-shadow:
               inset 0 0 40px rgba(0,0,0,0.9),
-              0 0 14px rgba(120,180,255,0.18);
+              0 0 22px rgba(120,180,255,0.45);
           }
         }
 
@@ -1312,49 +1230,6 @@ export default function App() {
           90% { transform: translate(-2px, -1px); }
           100% { transform: translate(0px, 0px); }
         }
-
-        @keyframes screenCrackGlow {
-          0%, 100% { opacity: 0.28; }
-          50% { opacity: 0.55; }
-        }
-
-        @keyframes blueGlitchFlicker {
-          0% { opacity: 0.12; transform: translateX(0px); }
-          20% { opacity: 0.28; transform: translateX(-4px); }
-          40% { opacity: 0.08; transform: translateX(3px); }
-          60% { opacity: 0.2; transform: translateX(-6px); }
-          80% { opacity: 0.14; transform: translateX(5px); }
-          100% { opacity: 0.18; transform: translateX(0px); }
-        }
-
-        @keyframes splitLeft {
-          0% { transform: translateX(0px); }
-          25% { transform: translateX(-3px); }
-          50% { transform: translateX(-9px); }
-          75% { transform: translateX(-5px); }
-          100% { transform: translateX(-12px); }
-        }
-
-        @keyframes splitRight {
-          0% { transform: translateX(0px); }
-          25% { transform: translateX(3px); }
-          50% { transform: translateX(9px); }
-          75% { transform: translateX(5px); }
-          100% { transform: translateX(12px); }
-        }
-
-        @keyframes trappedPulse {
-          0%, 100% { opacity: 0.18; }
-          50% { opacity: 0.32; }
-        }
-
-        @keyframes enemyFlash {
-          0% { opacity: 0; transform: scale(0.6); }
-          20% { opacity: 1; transform: scale(1.25); }
-          40% { opacity: 0.4; transform: scale(0.9); }
-          60% { opacity: 1; transform: scale(1.12); }
-          100% { opacity: 1; transform: scale(1); }
-        }
       `}</style>
 
       <div
@@ -1365,402 +1240,262 @@ export default function App() {
         }}
       />
 
-      <div
-        style={{
-          ...styles.uiFrame,
-          opacity:
-            deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal"
-              ? 0.05
-              : deathSequenceType === "playerEnter"
-              ? 0.08
-              : 1,
-          transition: "opacity 0.2s ease",
-        }}
-      >
-        <div style={styles.headerRow}>
-          <div>
-            <div style={styles.title}>Regular Engagement</div>
-            <div style={styles.subTitle}>데이터 침투 프로토콜 v2</div>
-          </div>
+      <div style={styles.headerRow}>
+        <div>
+          <div style={styles.title}>Regular Engagement</div>
+          <div style={styles.subTitle}> 데이터 침투 프로토콜 v2</div>
+        </div>
 
-          <div style={styles.headerButtons}>
-            <button
-              style={viewMode === "map" ? styles.modeButtonActive : styles.modeButton}
-              onClick={() => requestViewMode("map")}
-            >
-              맵
-            </button>
-            <button
-              style={viewMode === "tablet" ? styles.modeButtonActive : styles.modeButton}
-              onClick={() => requestViewMode("tablet")}
-            >
-              태블릿
-            </button>
+        <div style={styles.headerButtons}>
+          <button
+            style={viewMode === "map" ? styles.modeButtonActive : styles.modeButton}
+            onClick={() => {
+              ensureBgmStarted();
+              if (!isMoving && !isScanning) setViewMode("map");
+            }}
+          >
+            맵
+          </button>
+          <button
+            style={viewMode === "tablet" ? styles.modeButtonActive : styles.modeButton}
+            onClick={() => {
+              ensureBgmStarted();
+              if (!isMoving && !isScanning) setViewMode("tablet");
+            }}
+          >
+            태블릿
+          </button>
+        </div>
+      </div>
+
+      <div style={styles.topInfoBar}>
+        <div style={styles.infoBlock}>
+          <div style={styles.infoLabel}>현재 목표</div>
+          <div style={styles.infoValue}>
+            {finished ? "중앙으로 이동해 탈출" : "A / B / C 데이터 확보"}
           </div>
         </div>
 
-        <div style={styles.topInfoBar}>
-          <div style={styles.infoBlock}>
-            <div style={styles.infoLabel}>현재 목표</div>
-            <div style={styles.infoValue}>
-              {finished ? "중앙으로 이동해 탈출" : "A / B / C 데이터 확보"}
-            </div>
-          </div>
+        <div style={styles.infoBlock}>
+          <div style={styles.infoLabel}>진행률</div>
+          <div style={styles.infoValue}>{overallProgress}%</div>
+        </div>
 
-          <div style={styles.infoBlock}>
-            <div style={styles.infoLabel}>진행률</div>
-            <div style={styles.infoValue}>{overallProgress}%</div>
-          </div>
-
-          <div style={styles.infoBlock}>
-            <div style={styles.infoLabel}>탐지</div>
-            <div style={styles.infoValue}>{isScanning ? "스캔 중" : scanReady ? "사용 가능" : "불가"}</div>
-          </div>
-
-          <div style={styles.infoBlock}>
-            <div style={styles.infoLabel}>적 상태</div>
-            <div style={styles.infoValue}>
-              {sameRoomCause === "enemyEnteredPlayerRoom"
-                ? "같은 방"
-                : enemyMode === "wander"
-                ? "배회"
-                : enemyMode === "alerted"
-                ? "발견"
-                : "공격 대기"}
-            </div>
+        <div style={styles.infoBlock}>
+          <div style={styles.infoLabel}>탐지</div>
+          <div style={styles.infoValue}>
+            {isScanning ? "스캔 중" : scanReady ? "사용 가능" : "불가"}
           </div>
         </div>
 
-        <div
-          style={{
-            ...styles.mainWrap,
-            animation: escapeActive && phase === "playing" ? "escapeShake 0.16s linear infinite" : "none",
-          }}
-        >
-          <div style={styles.leftPanel}>
-            <div style={styles.topStatusBar}>
-              <div style={isMoving ? styles.spinnerFast : styles.spinner} />
-              <span style={styles.topStatusText}>
-                {deathPending
-                  ? "붕괴 중..."
-                  : isMoving
-                  ? "벤트 이동 중..."
-                  : isScanning
-                  ? "탐지 중..."
-                  : "대기 중"}
-              </span>
-            </div>
+        <div style={styles.infoBlock}>
+          <div style={styles.infoLabel}>위험</div>
+          <div style={styles.infoValue}>
+            {sameRoomWarning ? `침입 / ${sameRoomSeconds}s` : "불명"}
+          </div>
+        </div>
+      </div>
 
-            {viewMode === "map" ? (
+      <div style={styles.mainWrap}>
+        <div style={styles.leftPanel}>
+          <div style={styles.topStatusBar}>
+            <div style={isMoving ? styles.spinnerFast : styles.spinner} />
+            <span style={styles.topStatusText}>
+              {isMoving ? "벤트 이동 중..." : isScanning ? "탐지 중..." : "대기 중"}
+            </span>
+          </div>
+
+          {viewMode === "map" ? (
+            <div style={styles.mapBoardWrap}>
               <div
                 style={{
-                  ...styles.mapBoardWrap,
-                  position:
-                    deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal"
-                      ? "fixed"
-                      : "relative",
-                  left:
-                    deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal"
-                      ? "50%"
-                      : undefined,
-                  top:
-                    deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal"
-                      ? "50%"
-                      : undefined,
-                  transform:
-                    deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal"
-                      ? "translate(-50%, -50%) scale(1.12)"
-                      : undefined,
-                  zIndex:
-                    deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal"
-                      ? 40
-                      : 2,
-                  boxShadow:
-                    deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal"
-                      ? "0 0 0 9999px rgba(0,0,0,0.98)"
-                      : undefined,
+                  ...styles.mapBoard,
+                  animation: isMoving ? "moveBoardBlink 0.55s ease-in-out infinite" : "none",
                 }}
               >
-                <div
-                  style={{
-                    ...styles.mapBoard,
-                    animation: isMoving ? "moveBoardBlink 0.55s ease-in-out infinite" : "none",
-                  }}
+                {corridorSegments.map((seg, i) => {
+                  const a = rooms.find((r) => r.id === seg.left)!;
+                  const b = rooms.find((r) => r.id === seg.right)!;
+
+                  const ax = a.x * GAP_X + OFFSET_X + ROOM_WIDTH / 2;
+                  const ay = a.y * GAP_Y + OFFSET_Y + ROOM_HEIGHT / 2;
+                  const bx = b.x * GAP_X + OFFSET_X + ROOM_WIDTH / 2;
+                  const by = b.y * GAP_Y + OFFSET_Y + ROOM_HEIGHT / 2;
+
+                  const isHorizontal = ay === by;
+
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        position: "absolute",
+                        left: Math.min(ax, bx),
+                        top: Math.min(ay, by),
+                        width: isHorizontal ? Math.abs(bx - ax) : 4,
+                        height: isHorizontal ? 4 : Math.abs(by - ay),
+                        background: "rgba(111,122,131,0.92)",
+                        borderRadius: 0,
+                      }}
+                    />
+                  );
+                })}
+
+                {rooms.map((room) => {
+                  const left = room.x * GAP_X + OFFSET_X;
+                  const top = room.y * GAP_Y + OFFSET_Y;
+                  const isCurrent = playerRoom === room.id;
+                  const isNeighbor = roomMap[playerRoom].neighbors.includes(room.id);
+                  const isDetected = detection.visible && detection.roomId === room.id;
+                  const isFakeDetected = detection.fakeRoomIds.includes(room.id);
+
+                  return (
+                    <div
+                      key={room.id}
+                      onClick={() => handleMove(room.id)}
+                      style={{
+                        ...styles.room,
+                        left,
+                        top,
+                        cursor:
+                          isMoving || isScanning || escapeActive
+                            ? "default"
+                            : isNeighbor
+                            ? "pointer"
+                            : "default",
+                        opacity: isCurrent ? 1 : isNeighbor ? 1 : 0.8,
+                        borderColor:
+                          room.id === moveTarget
+                            ? "#c8d7e8"
+                            : isNeighbor
+                            ? "#91a8bc"
+                            : "#6a7580",
+                      }}
+                    >
+                      <div style={styles.roomId}>{room.id}</div>
+                      <div style={styles.roomLabel}>{room.label}</div>
+
+                      {room.type === "dataA" && <div style={styles.roomTag}>A</div>}
+                      {room.type === "dataB" && <div style={styles.roomTag}>B</div>}
+                      {room.type === "dataC" && <div style={styles.roomTag}>C</div>}
+                      {room.type === "center" && <div style={styles.roomTag}>중앙</div>}
+
+                      {isCurrent && (
+                        <div style={isMoving ? styles.playerDotFast : styles.playerDot} />
+                      )}
+
+                      {isDetected && <div style={styles.enemyDot} />}
+                      {isFakeDetected && <div style={styles.fakeEnemyDot} />}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={styles.actionRow}>
+                <button
+                  style={
+                    scanReady && !isScanning && !isMoving
+                      ? styles.actionButton
+                      : styles.actionButtonDisabled
+                  }
+                  onClick={handleScan}
+                  disabled={!scanReady || isScanning || isMoving}
                 >
-                  {corridorSegments.map((seg, i) => {
-                    const a = rooms.find((r) => r.id === seg.left)!;
-                    const b = rooms.find((r) => r.id === seg.right)!;
+                  {isScanning
+                    ? "스캔 중..."
+                    : meltdownTriggered && !meltdownResolved
+                    ? "재탐지"
+                    : "탐지"}
+                </button>
 
-                    const ax = a.x * GAP_X + OFFSET_X + ROOM_WIDTH / 2;
-                    const ay = a.y * GAP_Y + OFFSET_Y + ROOM_HEIGHT / 2;
-                    const bx = b.x * GAP_X + OFFSET_X + ROOM_WIDTH / 2;
-                    const by = b.y * GAP_Y + OFFSET_Y + ROOM_HEIGHT / 2;
-
-                    const isHorizontal = ay === by;
-                    const isDeathPath =
-                      deathSequenceType === "playerEnter" &&
-                      ((seg.left === playerRoom && seg.right === moveTarget) ||
-                        (seg.right === playerRoom && seg.left === moveTarget));
-
-                    return (
-                      <div
-                        key={i}
-                        style={{
-                          position: "absolute",
-                          left: Math.min(ax, bx),
-                          top: Math.min(ay, by),
-                          width: isHorizontal ? Math.abs(bx - ax) : 4,
-                          height: isHorizontal ? 4 : Math.abs(by - ay),
-                          background: isDeathPath
-                            ? "rgba(170,210,255,1)"
-                            : "rgba(111,122,131,0.92)",
-                          borderRadius: 0,
-                          boxShadow: isDeathPath ? "0 0 16px rgba(140,210,255,0.85)" : "none",
-                          opacity:
-                            deathSequenceType === "playerEnter"
-                              ? isDeathPath
-                                ? 1
-                                : 0.02
-                              : 1,
-                          transition: "opacity 0.18s ease",
-                        }}
-                      />
-                    );
-                  })}
-
-                  {rooms.map((room) => {
-                    const left = room.x * GAP_X + OFFSET_X;
-                    const top = room.y * GAP_Y + OFFSET_Y;
-                    const isCurrent = playerRoom === room.id;
-                    const isNeighbor = roomMap[playerRoom].neighbors.includes(room.id);
-                    const isDetected = detection.visible && detection.roomId === room.id;
-                    const isFakeDetected = detection.fakeRoomIds.includes(room.id);
-
-                    const isPlayerEnterVisible =
-                      deathSequenceType === "playerEnter" &&
-                      (room.id === playerRoom || room.id === moveTarget);
-
-                    const isFocused =
-                      (deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal") &&
-                      room.id === deathFocusRoom;
-
-                    const forcedOpacity =
-                      deathSequenceType === "playerEnter"
-                        ? isPlayerEnterVisible
-                          ? 1
-                          : 0.02
-                        : deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal"
-                        ? isFocused
-                          ? 1
-                          : 0.02
-                        : isCurrent
-                        ? 1
-                        : isNeighbor
-                        ? 1
-                        : 0.8;
-
-                    return (
-                      <div
-                        key={room.id}
-                        onClick={() => handleMove(room.id)}
-                        style={{
-                          ...styles.room,
-                          left,
-                          top,
-                          cursor:
-                            isMoving || isScanning || escapeActive || deathPending
-                              ? "default"
-                              : isNeighbor
-                              ? "pointer"
-                              : "default",
-                          opacity: forcedOpacity,
-                          borderColor:
-                            room.id === moveTarget
-                              ? "#c8d7e8"
-                              : isNeighbor
-                              ? "#91a8bc"
-                              : "#6a7580",
-                          boxShadow:
-                            (deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal") &&
-                            room.id === deathFocusRoom
-                              ? "0 0 24px rgba(160,220,255,0.6), inset 0 0 18px rgba(60,120,255,0.22)"
-                              : isPlayerEnterVisible
-                              ? "0 0 20px rgba(160,220,255,0.45), inset 0 0 10px rgba(0,0,0,0.8)"
-                              : "inset 0 0 6px rgba(0,0,0,0.8)",
-                          transition: "opacity 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease",
-                        }}
-                      >
-                        <div style={styles.roomId}>{room.id}</div>
-                        <div style={styles.roomLabel}>{room.label}</div>
-
-                        {room.type === "dataA" && <div style={styles.roomTag}>A</div>}
-                        {room.type === "dataB" && <div style={styles.roomTag}>B</div>}
-                        {room.type === "dataC" && <div style={styles.roomTag}>C</div>}
-                        {room.type === "center" && <div style={styles.roomTag}>중앙</div>}
-
-                        {deathSequenceType !== "playerEnter" && isCurrent && (
-                          <div style={isMoving ? styles.playerDotFast : styles.playerDot} />
-                        )}
-
-                        {isDetected && deathSequenceType == null && <div style={styles.enemyDot} />}
-                        {isFakeDetected && deathSequenceType == null && <div style={styles.fakeEnemyDot} />}
-
-                        {(deathSequenceType === "enemyEnter" || deathSequenceType === "scanReveal") &&
-                          room.id === deathFocusRoom && (
-                            <>
-                              <div style={styles.playerDot} />
-                              <div
-                                style={{
-                                  ...styles.enemyDot,
-                                  left: "auto",
-                                  right: 18,
-                                  bottom: 18,
-                                  animation: "enemyFlash 0.35s linear infinite alternate",
-                                }}
-                              />
-                            </>
-                          )}
-                      </div>
-                    );
-                  })}
-
-                  {deathSequenceType === "playerEnter" && deathMovingDot && (
-                    <div
-                      style={{
-                        ...styles.pathPlayerDot,
-                        left: deathMovingDot.x - 6,
-                        top: deathMovingDot.y - 6,
-                      }}
-                    />
-                  )}
-
-                  {deathSequenceType === "playerEnter" && moveTarget && deathEnemyFlash && (
-                    <div
-                      style={{
-                        ...styles.pathEnemyFlashDot,
-                        left: roomCenter(moveTarget).x - 7,
-                        top: roomCenter(moveTarget).y - 7,
-                      }}
-                    />
-                  )}
-                </div>
-
-                <div style={styles.actionRow}>
-                  <button
-                    style={
-                      scanReady && !isScanning && !isMoving && !deathPending
-                        ? styles.actionButton
-                        : styles.actionButtonDisabled
-                    }
-                    onClick={handleScan}
-                    disabled={!scanReady || isScanning || isMoving || deathPending}
-                  >
-                    {isScanning
-                      ? "스캔 중..."
-                      : meltdownTriggered && !meltdownResolved
-                      ? "재탐지"
-                      : "탐지"}
-                  </button>
-
-                  <button
-                    style={
-                      playerRoom === "R7" && finished && !escapeActive && !deathPending
-                        ? styles.actionButton
-                        : styles.actionButtonDisabled
-                    }
-                    onClick={handleEscape}
-                    disabled={!(playerRoom === "R7" && finished && !escapeActive && !deathPending)}
-                  >
-                    {escapeActive ? `탈출 ${escapeSeconds}s` : "중앙 탈출"}
-                  </button>
-                </div>
+                <button
+                  style={
+                    playerRoom === "R7" && finished && !escapeActive
+                      ? styles.actionButton
+                      : styles.actionButtonDisabled
+                  }
+                  onClick={handleEscape}
+                  disabled={!(playerRoom === "R7" && finished && !escapeActive)}
+                >
+                  {escapeActive ? `탈출 ${escapeSeconds}s` : "중앙 탈출"}
+                </button>
               </div>
-            ) : (
-              <div style={styles.tabletWrap}>
-                <div style={styles.tabletScreen}>
-                  <div style={styles.tabletTitle}>정보국 데이터 체계로 업로드</div>
-                  <div style={styles.tabletCurrent}>현재 위치: {currentRoom.label}</div>
+            </div>
+          ) : (
+            <div style={styles.tabletWrap}>
+              <div style={styles.tabletScreen}>
+                <div style={styles.tabletTitle}>정보국 데이터 체계로 업로드</div>
+                <div style={styles.tabletCurrent}>현재 위치: {currentRoom.label}</div>
 
-                  <div style={styles.progressGrid}>
-                    <div style={styles.progressCard}>
-                      <div style={styles.progressCardTitle}>A 데이터</div>
-                      <div style={styles.progressBar}>
-                        <div style={{ ...styles.progressFill, width: `${progress.A}%` }} />
-                      </div>
-                      <div style={styles.progressText}>{Math.floor(progress.A)}%</div>
+                <div style={styles.progressGrid}>
+                  <div style={styles.progressCard}>
+                    <div style={styles.progressCardTitle}>A 데이터</div>
+                    <div style={styles.progressBar}>
+                      <div style={{ ...styles.progressFill, width: `${progress.A}%` }} />
                     </div>
-
-                    <div style={styles.progressCard}>
-                      <div style={styles.progressCardTitle}>B 데이터</div>
-                      <div style={styles.progressBar}>
-                        <div style={{ ...styles.progressFill, width: `${progress.B}%` }} />
-                      </div>
-                      <div style={styles.progressText}>{Math.floor(progress.B)}%</div>
-                    </div>
-
-                    <div style={styles.progressCard}>
-                      <div style={styles.progressCardTitle}>C 데이터</div>
-                      <div style={styles.progressBar}>
-                        <div style={{ ...styles.progressFill, width: `${progress.C}%` }} />
-                      </div>
-                      <div style={styles.progressText}>{Math.floor(progress.C)}%</div>
-                    </div>
+                    <div style={styles.progressText}>{Math.floor(progress.A)}%</div>
                   </div>
 
-                  <div style={styles.tabletHint}>
-                    {getTaskKeyByRoom(playerRoom)
-                      ? "현재 구역에서는 태블릿을 켜 두는 동안 데이터가 누적된다."
-                      : "현재 구역은 데이터 수집 지점이 아니다."}
+                  <div style={styles.progressCard}>
+                    <div style={styles.progressCardTitle}>B 데이터</div>
+                    <div style={styles.progressBar}>
+                      <div style={{ ...styles.progressFill, width: `${progress.B}%` }} />
+                    </div>
+                    <div style={styles.progressText}>{Math.floor(progress.B)}%</div>
+  
                   </div>
 
-                  <img src="/images/logo.png" style={styles.tabletLogo} />
+                  <div style={styles.progressCard}>
+                    <div style={styles.progressCardTitle}>C 데이터</div>
+                    <div style={styles.progressBar}>
+                      <div style={{ ...styles.progressFill, width: `${progress.C}%` }} />
+                    </div>
+                    <div style={styles.progressText}>{Math.floor(progress.C)}%</div>
+                  </div>
                 </div>
+
+                <div style={styles.tabletHint}>
+                  {getTaskKeyByRoom(playerRoom)
+                    ? "현재 구역에서는 태블릿을 켜 두는 동안 데이터가 누적된다."
+                    : "현재 구역은 데이터 수집 지점이 아니다."}
+                </div>
+                <img src="/images/logo.png" style={styles.tabletLogo} />
               </div>
-            )}
+            </div>
+          )}
+        </div>
+
+        <div style={styles.rightPanel}>
+          <div style={styles.sideCard}>
+            <div style={styles.sideTitle}>현재 상태</div>
+            <div style={styles.sideLine}>구역: {currentRoom.label}</div>
+            <div style={styles.sideLine}>
+              위험 요소: {sameRoomWarning ? "같은 구역" : "탐지 필요"}
+            </div>
+            <div style={styles.sideLine}>이동 상태: {isMoving ? "벤트 이동 중" : "정지"}</div>
           </div>
 
-          <div style={styles.rightPanel}>
-            <div style={styles.sideCard}>
-              <div style={styles.sideTitle}>현재 상태</div>
-              <div style={styles.sideLine}>구역: {currentRoom.label}</div>
-              <div style={styles.sideLine}>
-                위험 요소:{" "}
-                {sameRoomCause === "enemyEnteredPlayerRoom"
-                  ? "같은 방"
-                  : enemyMode === "attackWindup"
-                  ? "바로 앞"
-                  : enemyMode === "alerted"
-                  ? "추적 중"
-                  : "배회 중"}
-              </div>
-              <div style={styles.sideLine}>이동 상태: {isMoving ? "벤트 이동 중" : "정지"}</div>
-            </div>
+          <div style={styles.sideCard}>
+            <div style={styles.sideTitle}>위험 문구</div>
+            <div style={styles.sideText}>{dangerText}</div>
+          </div>
 
-            <div style={styles.sideCard}>
-              <div style={styles.sideTitle}>위험 문구</div>
-              <div style={styles.sideText}>{dangerText}</div>
-            </div>
-
-            <div style={styles.sideCard}>
-              <div style={styles.sideTitle}>진행 목표</div>
-              <div style={styles.sideText}>
-                {finished
-                  ? "모든 데이터 확보 완료. 중앙에서 4초 버티면 탈출."
-                  : "A / B / C 지점에서 데이터를 확보한 뒤 중앙으로 복귀하라."}
-              </div>
+          <div style={styles.sideCard}>
+            <div style={styles.sideTitle}>진행 목표</div>
+            <div style={styles.sideText}>
+              {finished
+                ? "모든 데이터 확보 완료. 중앙에서 4초 버티면 탈출."
+                : "A / B / C 지점에서 데이터를 확보한 뒤 중앙으로 복귀하라."}
             </div>
           </div>
         </div>
-
-        <div style={styles.bottomBar}>{statusText}</div>
       </div>
+
+      <div style={styles.bottomBar}>{statusText}</div>
 
       {phase === "dying" && (
         <div style={styles.overlay}>
           <div style={styles.overlayTitle}>연결 종료됨.</div>
-          <div style={styles.overlayText}>
-            알 수 없는 이유로 파견된 요원의 생체 신호가 종료되었습니다.
-          </div>
+          <div style={styles.overlayText}>알 수 없는 이유로 파견된 요원의 생체 신호가 종료되었습니다.</div>
           <button style={styles.overlayButton} onClick={handleRestart}>
             다시 시도
           </button>
@@ -1795,14 +1530,14 @@ export default function App() {
       <div
         style={{
           ...styles.staticOverlay,
-          opacity: screenStatic ? 0.18 : phase === "dying" ? 0.32 : 0,
+          opacity: screenStatic ? 0.22 : phase === "dying" ? 0.34 : 0,
         }}
       />
 
       <div
         style={{
-          ...styles.sameRoomOverlay,
-          opacity: sameRoomCause === "enemyEnteredPlayerRoom" && !deathPending ? 1 : 0,
+          ...styles.emergencyOverlay,
+          opacity: emergencyBlink ? 1 : 0,
         }}
       />
 
@@ -1820,47 +1555,6 @@ export default function App() {
           animation: escapeActive ? "escapeWhiteFade 4s linear forwards" : "none",
         }}
       />
-
-      {(deathSequenceType === "playerEnter" ||
-        deathSequenceType === "enemyEnter" ||
-        deathSequenceType === "scanReveal") && (
-        <div style={styles.blackDeathStage}>
-          {deathSequenceType === "playerEnter" && (
-            <div
-              style={{
-                ...styles.blackDeathMapHolder,
-                left: "50%",
-                top: "50%",
-                transform: "translate(-50%, -50%) scale(1.06)",
-              }}
-            />
-          )}
-        </div>
-      )}
-
-      <div
-        style={{
-          ...styles.blueGlitchOverlay,
-          opacity: deathBlueGlitch ? 1 : 0,
-        }}
-      />
-
-      <div
-        style={{
-          ...styles.crackOverlay,
-          opacity: deathBlueGlitch ? 1 : 0,
-        }}
-      />
-
-      <div
-        style={{
-          ...styles.splitOverlay,
-          opacity: deathSplit ? 1 : 0,
-        }}
-      >
-        <div style={styles.splitLeft} />
-        <div style={styles.splitRight} />
-      </div>
 
       <div
         style={{
@@ -1884,16 +1578,11 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
   },
 
-  uiFrame: {
-    position: "relative",
-    zIndex: 2,
-  },
-
   bootOverlay: {
     position: "absolute",
     inset: 0,
     background: "#000",
-    zIndex: 80,
+    zIndex: 30,
     transition: "opacity 1.6s ease",
   },
 
@@ -2136,29 +1825,6 @@ const styles: Record<string, React.CSSProperties> = {
     boxShadow: "0 0 12px rgba(255,79,79,0.45)",
   },
 
-  pathPlayerDot: {
-    position: "absolute",
-    width: 12,
-    height: 12,
-    borderRadius: "50%",
-    background: "#63b8ff",
-    boxShadow: "0 0 18px rgba(120,190,255,0.95)",
-    zIndex: 8,
-    pointerEvents: "none",
-  },
-
-  pathEnemyFlashDot: {
-    position: "absolute",
-    width: 14,
-    height: 14,
-    borderRadius: "50%",
-    background: "#ff3d3d",
-    boxShadow: "0 0 28px rgba(255,60,60,1)",
-    zIndex: 9,
-    pointerEvents: "none",
-    animation: "enemyFlash 0.32s ease-out infinite alternate",
-  },
-
   actionRow: {
     display: "flex",
     gap: 10,
@@ -2215,11 +1881,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
 
   progressCard: {
-    background: "#11171d",
-    border: "1px solid #5e6974",
-    padding: "12px",
-    position: "relative",
-  },
+  background: "#11171d",
+  border: "1px solid #5e6974",
+  padding: "12px",
+  position: "relative", // 🔥 이거 필수
+},
 
   progressCardTitle: {
     fontSize: "14px",
@@ -2265,7 +1931,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     inset: 0,
     background: "rgba(0,0,0,0.78)",
-    zIndex: 70,
+    zIndex: 24,
     display: "flex",
     flexDirection: "column",
     justifyContent: "center",
@@ -2305,7 +1971,7 @@ const styles: Record<string, React.CSSProperties> = {
     position: "absolute",
     inset: 0,
     pointerEvents: "none",
-    zIndex: 51,
+    zIndex: 16,
     background:
       "repeating-linear-gradient(0deg, rgba(255,255,255,0.12) 0px, rgba(255,255,255,0.12) 1px, transparent 1px, transparent 3px)",
     mixBlendMode: "screen",
@@ -2313,13 +1979,14 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "opacity 0.18s ease",
   },
 
-  sameRoomOverlay: {
+  emergencyOverlay: {
     position: "absolute",
     inset: 0,
     pointerEvents: "none",
     zIndex: 17,
-    background: "rgba(120, 0, 0, 0.22)",
-    animation: "trappedPulse 1.2s ease-in-out infinite",
+    background: "rgba(255, 0, 0, 0.42)",
+    mixBlendMode: "screen",
+    animation: "redAlarmStrong 0.85s ease-in-out infinite",
     transition: "opacity 0.18s ease",
   },
 
@@ -2342,78 +2009,12 @@ const styles: Record<string, React.CSSProperties> = {
     transition: "opacity 0.25s ease",
   },
 
-  blackDeathStage: {
-    position: "absolute",
-    inset: 0,
-    background: "rgba(0,0,0,0.985)",
-    pointerEvents: "none",
-    zIndex: 30,
-  },
-
-  blackDeathMapHolder: {
-    position: "absolute",
-    width: BOARD_WIDTH + 28,
-    height: BOARD_HEIGHT + 28,
-    border: "1px solid rgba(150,210,255,0.18)",
-    boxShadow: "0 0 28px rgba(120,190,255,0.12)",
-  },
-
-  blueGlitchOverlay: {
-    position: "absolute",
-    inset: 0,
-    pointerEvents: "none",
-    zIndex: 55,
-    background:
-      "linear-gradient(90deg, rgba(50,120,255,0.08) 0%, rgba(120,220,255,0.22) 12%, rgba(20,30,80,0.02) 22%, rgba(30,100,255,0.14) 31%, rgba(130,220,255,0.2) 48%, rgba(10,20,60,0.04) 63%, rgba(50,140,255,0.16) 79%, rgba(150,240,255,0.26) 100%)",
-    mixBlendMode: "screen",
-    animation: "blueGlitchFlicker 0.18s steps(2, end) infinite",
-    transition: "opacity 0.12s ease",
-  },
-
-  crackOverlay: {
-    position: "absolute",
-    inset: 0,
-    pointerEvents: "none",
-    zIndex: 56,
-    background:
-      "linear-gradient(92deg, transparent 0%, transparent 18%, rgba(170,240,255,0.6) 19%, rgba(50,120,255,0.12) 20%, transparent 21%, transparent 36%, rgba(170,240,255,0.72) 37%, rgba(40,90,255,0.15) 38%, transparent 39%, transparent 52%, rgba(170,240,255,0.5) 53%, rgba(40,90,255,0.14) 54%, transparent 55%, transparent 69%, rgba(170,240,255,0.76) 70%, rgba(40,90,255,0.14) 71%, transparent 72%, transparent 100%)",
-    animation: "screenCrackGlow 0.22s ease-in-out infinite",
-    transition: "opacity 0.12s ease",
-  },
-
-  splitOverlay: {
-    position: "absolute",
-    inset: 0,
-    pointerEvents: "none",
-    zIndex: 57,
-    overflow: "hidden",
-    transition: "opacity 0.12s ease",
-  },
-
-  splitLeft: {
-    position: "absolute",
-    inset: 0,
-    background:
-      "linear-gradient(90deg, rgba(0,0,0,0) 0%, rgba(40,160,255,0.06) 30%, rgba(140,240,255,0.08) 49%, rgba(0,0,0,0) 50%)",
-    clipPath: "polygon(0 0, 49.3% 0, 47.4% 100%, 0 100%)",
-    animation: "splitLeft 0.18s steps(2,end) infinite alternate",
-  },
-
-  splitRight: {
-    position: "absolute",
-    inset: 0,
-    background:
-      "linear-gradient(90deg, rgba(0,0,0,0) 50%, rgba(140,240,255,0.08) 51%, rgba(40,160,255,0.06) 70%, rgba(0,0,0,0) 100%)",
-    clipPath: "polygon(52.6% 0, 100% 0, 100% 100%, 50.7% 100%)",
-    animation: "splitRight 0.18s steps(2,end) infinite alternate",
-  },
-
   deathOverlay: {
     position: "absolute",
     inset: 0,
     pointerEvents: "none",
-    zIndex: 60,
-    animation: "deathRedFade 1.6s ease forwards",
+    zIndex: 22,
+    animation: "deathRedFade 2s ease forwards",
     transition: "opacity 0.2s ease",
   },
 
@@ -2454,11 +2055,13 @@ const styles: Record<string, React.CSSProperties> = {
     animation: "caretBlink 1s step-end infinite",
   },
 
-  tabletLogo: {
-    display: "block",
-    margin: "12px auto 0",
-    width: 80,
-    height: 80,
-    opacity: 0.2,
-  },
+  
+
+tabletLogo: {
+  display: "block",
+  margin: "12px auto 0", // 🔥 가운데 정렬 핵심
+  width: 80,
+  height: 80,
+  opacity: 0.2,
+},
 };
