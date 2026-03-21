@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { rooms, corridorSegments, startRooms, roomMap } from "./data/mapData";
 
 type ViewMode = "map" | "tablet";
@@ -48,8 +48,8 @@ const ENEMY_VENT_SOUNDS = [
   "/sounds/vent6.mp3",
 ];
 
-function randomOf<T>(arr: T[]) {
-  return arr[Math.floor(Math.random() * arr.length)];
+function randomOf<T>(arr: readonly T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)] as T;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -1566,7 +1566,7 @@ function stopEscapeAudio() {
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
   app: {
     minHeight: "100vh",
     background: "#0b0f14",
